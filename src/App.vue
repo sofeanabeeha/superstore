@@ -112,7 +112,7 @@ export default {
 
         if (error instanceof TypeError) {
           this.error =
-            "Cannot connect to the backend. Make sure app.py is running on port 5001.";
+            "Cannot connect to the backend. Please try again shortly.";
         } else {
           this.error =
             error.message || "Something went wrong.";
