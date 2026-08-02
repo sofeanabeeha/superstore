@@ -1,8 +1,10 @@
-from pathlib import Path
+import os
 
 import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from analytics import ANALYTICS_HANDLERS
 from utility import detect_intent
@@ -11,7 +13,31 @@ from utility import detect_intent
 app = Flask(__name__)
 CORS(app)
 
-CSV_PATH = Path(__file__).resolve().parent / "superstore.csv"
+
+# Read the PostgreSQL connection URL from the environment.
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not set."
+    )
+
+# Render gives a URL beginning with postgresql://.
+# This changes it so SQLAlchemy uses Psycopg 3.
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+psycopg://",
+        1
+    )
+
+
+# Create one reusable database engine.
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True
+)
+
 
 @app.route("/", methods=["GET"])
 def health_check():
@@ -20,27 +46,43 @@ def health_check():
         "message": "InsightIQ backend is running."
     }), 200
 
-def load_data():
-    """Load and prepare the Superstore dataset."""
 
-    if not CSV_PATH.exists():
-        raise FileNotFoundError(
-            f"superstore.csv was not found at {CSV_PATH}"
+def load_data():
+    """Load and prepare Superstore data from PostgreSQL."""
+
+    query = text("""
+        SELECT *
+        FROM superstore_orders
+    """)
+
+    with engine.connect() as connection:
+        dataframe = pd.read_sql(
+            query,
+            connection
         )
 
-    dataframe = pd.read_csv(
-        CSV_PATH,
-        encoding="latin-1"
-    )
+    # Convert PostgreSQL column names back to the names
+    # expected by analytics.py.
+    column_mapping = {
+        "category": "Category",
+        "sales": "Sales",
+        "product_name": "Product Name",
+        "customer_name": "Customer Name",
+        "order_date": "Order Date",
+        "segment": "Segment"
+    }
 
-    dataframe.columns = dataframe.columns.str.strip()
+    dataframe = dataframe.rename(
+        columns=column_mapping
+    )
 
     required_columns = [
         "Category",
         "Sales",
         "Product Name",
         "Customer Name",
-        "Order Date"
+        "Order Date",
+        "Segment"
     ]
 
     missing_columns = [
@@ -51,7 +93,7 @@ def load_data():
 
     if missing_columns:
         raise ValueError(
-            "Missing CSV columns: "
+            "Missing database columns: "
             + ", ".join(missing_columns)
         )
 
@@ -93,8 +135,8 @@ def ask_question():
             return jsonify({
                 "success": False,
                 "error": (
-                    "This question is not supported yet." 
-                    "Try asking suggested question."
+                    "This question is not supported yet. "
+                    "Try asking one of the suggested questions."
                 )
             }), 400
 
@@ -104,7 +146,7 @@ def ask_question():
             return jsonify({
                 "success": False,
                 "error": (
-                    f"No analytics function was found "
+                    "No analytics function was found "
                     f"for: {intent}."
                 )
             }), 400
@@ -122,16 +164,20 @@ def ask_question():
 
         return jsonify(result), status_code
 
-    except FileNotFoundError:
+    except SQLAlchemyError as error:
+        print("Database error:", error)
+
         return jsonify({
             "success": False,
             "error": (
-                "superstore.csv was not found "
-                "inside the backend folder."
+                "InsightIQ could not retrieve data "
+                "from the database."
             )
         }), 500
 
     except ValueError as error:
+        print("Data error:", error)
+
         return jsonify({
             "success": False,
             "error": str(error)
@@ -147,6 +193,7 @@ def ask_question():
                 "the request."
             )
         }), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True)
